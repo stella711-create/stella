@@ -359,13 +359,22 @@ main{position:relative;z-index:1}
     </div>
 
     <div class="card">
+      <div class="card-title">云端同步</div>
+      <div class="set-row">
+        <div><div class="sr-label">GitHub 同步密钥</div><div class="sr-desc">填写后任意网络下手机电脑互通</div></div>
+        <input type="text" data-set="cloudToken" placeholder="粘贴密钥" autocomplete="off">
+      </div>
+      <div class="set-note">获取密钥（约 2 分钟）：电脑浏览器打开 github.com/settings/tokens → Generate new token (classic) → 勾选 repo → Generate → 复制粘贴到上面。手机和电脑要填同一个密钥。密钥只保存在你自己的设备里，不会上传。</div>
+    </div>
+
+    <div class="card">
       <div class="card-title">数据备份</div>
       <button class="set-btn primary" data-act="export">导出备份（JSON 文件）</button>
       <button class="set-btn ghost" data-act="import">导入恢复</button>
       <input type="file" id="import-file" class="hidden-file" accept=".json,application/json">
       <div class="set-note">换手机或清理浏览器缓存前，请先导出备份；导入会覆盖当前全部数据。</div>
       <button class="set-btn ghost" data-act="wipe">清空全部数据</button>
-      <div class="set-note">同一 Wi-Fi 下，手机与电脑的数据会通过这台 Mac 自动互相同步并合并（约每 8 秒一次）。Mac 关机期间各设备离线记录，重新开机后自动合并。清空会同时清掉所有设备上的数据，请谨慎。</div>
+      <div class="set-note">填写云端密钥后，各设备约每 8 秒自动同步合并一次，任意网络可用；未填密钥时仅在同一 Wi-Fi 下经家里的 Mac 同步。清空会同时清掉所有设备上的数据，请谨慎。</div>
     </div>
   </section>
 </main>
@@ -456,9 +465,37 @@ function renderPreservingFocus(){
   }
 }
 
-/* ---------- 多设备同步（经本机服务器中转，按修改时间智能合并） ---------- */
+/* ---------- 多设备同步（云端优先：GitHub 私有仓库；家里可用 Mac 局域网） ---------- */
 let syncBusy = false;
+let cloudSha = null;
+const CLOUD_URL = "https://api.github.com/repos/stella711-create/stella-data/contents/sync.json";
+function b64encode(str){
+  const bytes = new TextEncoder().encode(str);
+  let bin = "";
+  bytes.forEach(b=>{ bin += String.fromCharCode(b); });
+  return btoa(bin);
+}
+function cloudOn(){ return !!(db.settings && db.settings.cloudToken); }
+async function cloudGet(){
+  const r = await fetch(CLOUD_URL, { headers:{ "Authorization":"token "+db.settings.cloudToken, "Accept":"application/vnd.github+json" } });
+  if(r.status===404) return {};
+  if(!r.ok) throw 0;
+  const j = await r.json();
+  cloudSha = j.sha;
+  return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(j.content.replace(/\n/g,"")), c=>c.charCodeAt(0))));
+}
+async function cloudPut(){
+  const mk = ()=>({ message:"sync "+nowHM(), content:b64encode(JSON.stringify(db)), branch:"main", sha:cloudSha||undefined });
+  const opts = ()=>({ method:"PUT", headers:{ "Authorization":"token "+db.settings.cloudToken, "Accept":"application/vnd.github+json", "Content-Type":"application/json" }, body:JSON.stringify(mk()) });
+  let r = await fetch(CLOUD_URL, opts());
+  if(!r.ok){
+    await cloudGet().catch(()=>{});
+    r = await fetch(CLOUD_URL, opts());
+  }
+  if(r.ok){ try{ const j = await r.json(); if(j.content) cloudSha = j.content.sha; }catch(e){} }
+}
 function syncPush(){
+  if(cloudOn()){ cloudPut().catch(()=>{}); return; }
   try{
     fetch("data", { method:"POST", headers:{"Content-Type":"text/plain"}, body:JSON.stringify(db) }).catch(()=>{});
   }catch(e){}
@@ -467,9 +504,13 @@ async function syncPull(){
   if(syncBusy) return;
   syncBusy = true;
   try{
-    const r = await fetch("data", {cache:"no-store"});
-    if(!r.ok) throw 0;
-    const srv = await r.json();
+    let srv;
+    if(cloudOn()){ srv = await cloudGet(); }
+    else {
+      const r = await fetch("data", {cache:"no-store"});
+      if(!r.ok) throw 0;
+      srv = await r.json();
+    }
     if(srv && srv.updatedAt){
       if(!db.updatedAt || srv.updatedAt > db.updatedAt){
         const local = db, srvT = srv.updatedAt;
@@ -1155,6 +1196,9 @@ document.addEventListener("change", e=>{
     } else if(k==="morningOn" || k==="eveningOn"){
       s[k] = t.checked;
       if(t.checked) ensureNotifyPermission();
+    } else if(k==="cloudToken"){
+      s[k] = t.value.trim();
+      cloudSha = null;
     } else if(k==="morningTime" || k==="eveningTime"){
       if(t.value) s[k] = t.value;
     }
